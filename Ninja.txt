@@ -1,0 +1,227 @@
+-- Solos Hub: Ninja Legends v1. Loaded through the game picker, not standalone.
+-- Remote names/actions are compatibility assumptions until verified in a live game.
+local Hub, S, T, C = ...
+local A = Hub.API
+local Player, Workspace = A.LocalPlayer, A.Workspace
+local Storage = game:GetService("ReplicatedStorage")
+local Section, Button, Toggle, Slider, Dropdown = A.Section, A.Button, A.Toggle, A.Slider, A.Dropdown
+local state = {active = true, swing = false, sell = false, swords = false, belts = false,
+	skills = false, eggs = false, swingDelay = .2, sellDelay = 8, buyDelay = 2,
+	eggDelay = 2, visits = 0, requests = 0, discovery = 0, moving = nil, controls = {}, rows = {}}
+local function alive() local h = A.getHum(); return state.active and A.Live.Running and h and h.Health > 0 and A.getRoot() end
+local function running() return state.active and A.Live.Running end
+local function row(parent, name, value)
+	local label = A.InfoRow(parent, value)
+	label.TextWrapped = true; label.Parent.Size = UDim2.new(1, 0, 0, 48)
+	state.rows[name] = label; return label
+end
+local function status(name, text) if running() and state.rows[name] then state.rows[name].Text = text end end
+local function fail(key, text)
+	state[key] = false
+	if state.controls[key] then state.controls[key].Set(false) end
+	status(key == "eggs" and "eggs" or key == "sell" and "sell" or key == "swing" and "training" or "shop", text)
+end
+local function event(action, argument)
+	local remote = Player:FindFirstChild("ninjaEvent")
+	if not remote or not remote:IsA("RemoteEvent") then error("ninjaEvent is unavailable; automation stopped") end
+	if argument then remote:FireServer(action, argument) else remote:FireServer(action) end
+end
+local function crystalRemote()
+	local events = Storage:FindFirstChild("rEvents")
+	local remote = events and events:FindFirstChild("openCrystalRemote")
+	if not remote or not remote:IsA("RemoteFunction") then error("Crystal opening is unavailable; automation stopped") end
+	return remote
+end
+local function named(parent, name)
+	for _, item in ipairs(parent:GetChildren()) do if item.Name:lower() == name:lower() then return item end end
+end
+local function islands()
+	local folder = named(Workspace, "islandUnlockParts")
+	local out = {}
+	if folder then
+		for _, item in ipairs(folder:GetChildren()) do
+			local part = item:IsA("BasePart") and item or item:FindFirstChild("islandUnlockPart", true)
+			if part and part:IsA("BasePart") then out[#out+1] = {name = item.Name, part = part} end
+		end
+	end
+	table.sort(out, function(a,b) return a.part.Position.Y < b.part.Position.Y end)
+	return out
+end
+local function crystals()
+	local out, seen = {}, {}
+	local folder = named(Workspace, "crystalSpawns") or named(Workspace, "Crystals")
+	if folder then
+		for _, item in ipairs(folder:GetChildren()) do
+			if (item:IsA("Model") or item:IsA("Folder") or item:IsA("BasePart")) and not seen[item.Name] then
+				seen[item.Name] = true; out[#out+1] = item.Name
+			end
+		end
+	end
+	table.sort(out); return out
+end
+local function restoreMovement()
+	local move = state.moving; state.moving = nil
+	if move and A.getRoot() == move.root and Player.Character == move.character and move.root.Parent and
+		(move.root.Position - move.target.Position).Magnitude < 6 then
+		move.root.CFrame = move.home; move.root.AssemblyLinearVelocity = Vector3.zero
+	end
+end
+local function moveTo(part, token, hold)
+	local root = alive()
+	if not root or not part or not part.Parent then error("Character or destination is unavailable") end
+	if state.moving then return false end
+	local move = {root = root, character = Player.Character, home = root.CFrame, target = part.CFrame * CFrame.new(0, 2, 0)}
+	state.moving = move
+	local ok, err = pcall(function()
+		root.CFrame = move.target; root.AssemblyLinearVelocity = Vector3.zero
+		local touch = A.env.firetouchinterest or firetouchinterest
+		if type(touch) == "function" then pcall(touch, root, part, 0); pcall(touch, root, part, 1) end
+		local untilTime = os.clock() + hold
+		while running() and state.discovery == token and state.moving == move and A.getRoot() == root and os.clock() < untilTime do task.wait(.1) end
+	end)
+	if state.moving == move then restoreMovement() end
+	if not ok then error(err) end
+	return running() and state.discovery == token and A.getRoot() == root
+end
+local function nearestSell()
+	local root = alive(); if not root then return end
+	local folder = named(Workspace, "sellAreaCircles")
+	local closest, distance
+	if folder then
+		for _, circle in ipairs(folder:GetChildren()) do
+			local part = circle:FindFirstChild("circleInner", true)
+			if part and part:IsA("BasePart") then
+				local d = (part.Position - root.Position).Magnitude
+				if not distance or d < distance then closest, distance = part, d end
+			end
+		end
+	end
+	return closest
+end
+if game.PlaceId ~= 3956818381 then A.notify("Ninja Legends needs the original Ninja Legends game", T.Warn) end
+local panel = Hub.GamePanel("Ninja Legends", "autofarm", "Train, upgrade, discover islands and open crystals.")
+local train = panel.Sub("Training", "autofarm", "Swing and sell your ninjitsu.")
+local shop = panel.Sub("Upgrades", "loot", "Buy affordable weapons, belts and skills at the selected shop.")
+local world = panel.Sub("Islands", "teleports", "Visit island unlock pads or teleport to a selected island.")
+local pets = panel.Sub("Crystals", "loot", "Choose a crystal and open eggs using your in-game currency.")
+Hub.gameHeader("NINJA LEGENDS")
+A.TabButtons["Ninja Legends"].Btn.LayoutOrder = -19
+A.filterTabs({"Ninja Legends", "Dashboard", "Player", "ESP", "Players", "Teleports", "Commands", "Hub Chat", "Theme", "Settings"})
+local function toggle(parent, label, key, id, description)
+	state.controls[key] = Toggle(parent, label, false, function(v) state[key] = v end, nil, id, description)
+end
+local training = Section(train, "Auto Training", "Enable the training options you want", "autofarm")
+toggle(training, "Auto Swing", "swing", "ninja_swing", "Uses the game's swingKatana action while you are alive")
+Slider(training, "Swing delay (x0.1 seconds)", 2, 20, 2, function(v) state.swingDelay = v / 10 end, "ninja_swing_delay")
+row(training, "training", "Idle")
+local selling = Section(train, "Auto Sell", "Visits the nearest sell circle, then returns you", "loot")
+toggle(selling, "Auto Sell", "sell", "ninja_sell", "Temporarily moves your character; pauses during island discovery")
+Slider(selling, "Sell interval (seconds)", 3, 60, 8, function(v) state.sellDelay = v end, "ninja_sell_delay")
+row(selling, "sell", "Idle")
+local upgrades = Section(shop, "Auto Buy", "Purchases affordable upgrades with your coins; choose a shop you have unlocked", "loot")
+local shopDd = Dropdown(upgrades, "Purchase shop", {"Ground"}, 1)
+toggle(upgrades, "Auto Buy Weapons", "swords", nil, "Requests the next affordable swords through buyAllSwords")
+toggle(upgrades, "Auto Buy Belts", "belts", nil, "Upgrades ninjitsu storage with affordable belts")
+toggle(upgrades, "Auto Buy Skills", "skills", nil, "Buys affordable skills at the selected shop")
+Slider(upgrades, "Purchase interval (seconds)", 2, 30, 2, function(v) state.buyDelay = v end, "ninja_buy_delay")
+row(upgrades, "shop", "Idle; select your purchase shop")
+local islandSection = Section(world, "Island Discovery", "Visits unlock pads from lowest to highest; the game decides which unlock", "teleports")
+local islandDd = Dropdown(islandSection, "Island", {"Refresh islands"}, 1)
+local islandList, crystalList = {}, {}
+local eggSection = Section(pets, "Open Crystals", "Opening consumes currency and needs space in your pet inventory", "loot")
+local crystalDd = Dropdown(eggSection, "Crystal / egg", {"Refresh crystals"}, 1)
+toggle(eggSection, "Auto Open Eggs", "eggs", nil, "Opens one crystal per request; no automatic pet deletion")
+Slider(eggSection, "Open interval (seconds)", 2, 15, 2, function(v) state.eggDelay = v end, "ninja_egg_delay")
+row(eggSection, "eggs", "Choose a crystal, then enable Auto Open Eggs")
+local function options(dd, list, selected)
+	dd.SetOptions(list)
+	for i,name in ipairs(list) do if name == selected then dd.Set(i, true); break end end
+end
+local function refreshIslands()
+	local oldIsland, oldShop = islandDd.Name(), shopDd.Name()
+	islandList = islands()
+	local names, shops = {}, {"Ground"}
+	for _, item in ipairs(islandList) do names[#names+1] = item.name; shops[#shops+1] = item.name end
+	options(islandDd, #names > 0 and names or {"No island pads found"}, oldIsland)
+	options(shopDd, shops, oldShop)
+	status("islands", "Found " .. #names .. " island pads")
+end
+local function refreshCrystals()
+	local old = crystalDd.Name(); crystalList = crystals()
+	options(crystalDd, #crystalList > 0 and crystalList or {"No crystals found"}, old)
+	status("eggs", "Found " .. #crystalList .. " crystals")
+end
+row(islandSection, "islands", "Idle")
+Button(islandSection, "Refresh Islands", "Refresh", refreshIslands)
+Button(upgrades, "Refresh Shops", "Refresh", refreshIslands)
+Button(eggSection, "Refresh Crystals", "Refresh", refreshCrystals)
+local function visit(all)
+	if state.discovering or state.moving then status("islands", "Wait for the current movement to finish"); return end
+	if not alive() then status("islands", "Spawn before visiting islands"); return end
+	local list = all and islandList or {islandList[islandDd.Get()]}
+	if #list == 0 then status("islands", "No island pads found; refresh first"); return end
+	state.discovery = state.discovery + 1; local token = state.discovery
+	state.discovering = true; state.visits = 0
+	task.spawn(function()
+		local ok, err = pcall(function()
+			for _, item in ipairs(list) do
+				if not running() or state.discovery ~= token then break end
+				status("islands", "Visiting " .. item.name)
+				if not moveTo(item.part, token, 1) then break end
+				state.visits = state.visits + 1
+				task.wait(.25)
+			end
+		end)
+		if state.discovery == token then
+			status("islands", ok and ("Visited " .. state.visits .. " pads; check the game's unlocked islands") or tostring(err))
+		end
+		state.discovering = false
+	end)
+end
+Button(islandSection, "Discover All Islands", "Discover", function() visit(true) end)
+Button(islandSection, "Visit Selected Island", "Visit", function() visit(false) end, nil, "Visits the unlock pad, then returns you")
+Button(islandSection, "Stop Discovery", "Stop", function()
+	state.discovery = state.discovery + 1; restoreMovement(); status("islands", "Stopped")
+end)
+local function stopAll()
+	for _, key in ipairs({"swing","sell","swords","belts","skills","eggs"}) do state[key] = false; state.controls[key].Set(false) end
+	state.discovery = state.discovery + 1; restoreMovement()
+end
+Button(training, "Stop All Ninja Automation", "Stop All", stopAll)
+Button(eggSection, "Stop All Ninja Automation", "Stop All", stopAll)
+local function worker(key, delay, fn, paused)
+	task.spawn(function()
+		while running() do
+			if state[key] and alive() and (not paused or not paused()) then
+				local ok, err = pcall(fn)
+				if not ok then fail(key, tostring(err):gsub("^.-:%d+: ", "")) end
+				task.wait(delay())
+			else task.wait(.25) end
+		end
+	end)
+end
+worker("swing", function() return state.swingDelay end, function() event("swingKatana"); status("training", "Swing requested") end, function() return state.moving ~= nil end)
+worker("sell", function() return state.sellDelay end, function()
+	local part = nearestSell(); if not part then error("No sell circle found; Auto Sell stopped") end
+	if moveTo(part, state.discovery, .6) then status("sell", "Visited sell circle and returned") end
+end, function() return state.moving ~= nil or state.discovering end)
+for _, spec in ipairs({{"swords","buyAllSwords"},{"belts","buyAllBelts"},{"skills","buyAllSkills"}}) do
+	local key, action = spec[1], spec[2]
+	worker(key, function() return state.buyDelay end, function()
+		event(action, shopDd.Name()); status("shop", "Requested " .. key .. " at " .. shopDd.Name())
+	end)
+end
+worker("eggs", function() return state.eggDelay end, function()
+	local name = crystalList[crystalDd.Get()]
+	if not name then error("Choose an available crystal first") end
+	local result = crystalRemote():InvokeServer("openCrystal", name)
+	if not running() or not state.eggs then return end
+	if result == false then error("Game declined the crystal; check currency and pet capacity") end
+	state.requests = state.requests + 1
+	status("eggs", "Requested " .. name .. " | requests: " .. state.requests)
+end)
+A.bind(Player.CharacterRemoving, function()
+	state.discovery = state.discovery + 1; restoreMovement()
+end)
+A.onUnload(function() state.active = false; stopAll() end)
+refreshIslands(); refreshCrystals()
